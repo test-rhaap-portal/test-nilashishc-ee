@@ -1,0 +1,417 @@
+---
+# Execution Environment Build and Publish Workflow
+# Features:
+# - Galaxy server token configuration checks
+# - Support for private collection repositories (Git SCM tokens)
+# - Base image lifecycle checks
+# - Production release workflow with tagging
+# - Registry authentication for build and push
+#
+# Supported Secrets:
+#   Galaxy server tokens follow the Ansible naming convention:
+#     ANSIBLE_GALAXY_SERVER_<ID>_TOKEN
+#   where <ID> matches the [galaxy_server.<id>] section in ansible.cfg.
+#   ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN
+#   ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN
+#   ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN
+#   REGISTRY_USERNAME/PASSWORD   - Container registry credentials
+#   REDHAT_REGISTRY_PASSWORD     - Red Hat registry for base images
+#
+# Token Security:
+#   Galaxy server tokens are passed via Containerfile ARG directives and
+#   --build-arg, which are available during the build but do NOT persist
+#   in the final image (not in layers, metadata, or history).
+#   SCM tokens are resolved via envsubst into the build context after
+#   ansible-builder create. The multi-stage build ensures tokens only
+#   exist in intermediate stages, never in the final image.
+#   The ansible.cfg (server URLs only, no tokens) is volume-mounted into
+#   the build and also never enters any OCI layer.
+
+name: Execution Environment Build
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ee_dir:
+        description: "Directory containing the EE files (relative to repo root)"
+        required: false
+        default: "network-ee"
+        type: string
+      ee_file_name:
+        description: "EE definition file name"
+        required: false
+        default: "network-ee.yml"
+        type: string
+      ee_registry:
+        description: "Container registry"
+        required: false
+        default: "ghcr.io"
+        type: string
+      ee_image_name:
+        description: "Container image name (defaults to repository name)"
+        required: false
+        default: "test-rhaap-portal/network-ee"
+        type: string
+      skip_base_image_validation:
+        description: "Skip base image validation"
+        required: false
+        default: "false"
+        type: boolean
+
+# Required for pushing images to GHCR
+permissions:
+  contents: read
+  packages: write
+
+# Prevent concurrent builds on the same ref from racing to push tags
+concurrency:
+  group: ee-build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Container registry configuration (override via repository Variables)
+  REGISTRY: ${{ inputs.ee_registry || vars.EE_REGISTRY || 'ghcr.io' }}
+  IMAGE_NAME: ${{ inputs.ee_image_name || vars.EE_IMAGE_NAME || github.repository }}
+  # EE directory and file name (override via workflow_dispatch inputs or repository Variables)
+  EE_DIR: ${{ inputs.ee_dir || vars.EE_DIR || '.' }}
+  EE_FILE_NAME: ${{ inputs.ee_file_name || vars.EE_FILE_NAME || 'network-ee.yml' }}
+  # Base image age thresholds (in days) - annotations only, never blocks the build
+  IMAGE_WARN_AGE: 40
+  IMAGE_FAIL_AGE: 80
+
+jobs:
+  # ============================================================================
+  # Validation Stage
+  # ============================================================================
+  validate-tokens:
+    name: Token Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      galaxy_tokens_configured: ${{ steps.check-galaxy.outputs.configured }}
+      git_token_configured: ${{ steps.check-git-token.outputs.configured }}
+    steps:
+      - name: Check if galaxy server tokens are configured
+        id: check-galaxy
+        env:
+
+          ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN }}
+          ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN }}
+          ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN }}
+        run: |
+          CONFIGURED=false
+
+          if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN" ]]; then
+            echo "::notice::ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN is configured"
+            CONFIGURED=true
+          else
+            echo "::notice::No ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN secret configured"
+          fi
+          if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN" ]]; then
+            echo "::notice::ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN is configured"
+            CONFIGURED=true
+          else
+            echo "::notice::No ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN secret configured"
+          fi
+          if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN" ]]; then
+            echo "::notice::ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN is configured"
+            CONFIGURED=true
+          else
+            echo "::notice::No ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN secret configured"
+          fi
+          echo "configured=$CONFIGURED" >> "$GITHUB_OUTPUT"
+
+      - name: No SCM tokens required
+        id: check-git-token
+        run: |
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::No SCM tokens configured for this project"
+
+
+  check-base-image:
+    name: Check Base Image Lifecycle
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name != 'workflow_dispatch' ||
+      github.event.inputs.skip_base_image_validation != 'true'
+    outputs:
+      image_age_days: ${{ steps.check-age.outputs.age_days }}
+      image_status: ${{ steps.check-age.outputs.status }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Red Hat registry (for private base images)
+        if: vars.REDHAT_REGISTRY_USERNAME != ''
+        run: |
+          echo "${{ secrets.REDHAT_REGISTRY_PASSWORD }}" | \
+            podman login -u "${{ vars.REDHAT_REGISTRY_USERNAME }}" \
+            --password-stdin registry.redhat.io
+
+      - name: Extract base image from ${{ env.EE_DIR }}/${{ env.EE_FILE_NAME }}
+        id: get-image
+        run: |
+          EE_DEF="${{ env.EE_DIR }}/${{ env.EE_FILE_NAME }}"
+          # Handle both flat and nested (v3) EE spec formats
+          if command -v yq &> /dev/null; then
+            BASE_IMAGE=$(yq -r '.images.base_image.name // .images.base_image // empty' \
+              "$EE_DEF" 2>/dev/null || echo "")
+          fi
+          if [[ -z "$BASE_IMAGE" ]]; then
+            BASE_IMAGE=$(grep -A2 'base_image:' "$EE_DEF" | \
+              grep -oP 'name:\s*\K\S+' || \
+              grep -oP 'base_image:\s*\K\S+' "$EE_DEF" || echo "")
+            BASE_IMAGE=$(echo "$BASE_IMAGE" | tr -d '"' | tr -d "'" | head -1)
+          fi
+          echo "base_image=$BASE_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "::notice::Base image: $BASE_IMAGE"
+
+      - name: Check base image age
+        id: check-age
+        env:
+          BASE_IMAGE: ${{ steps.get-image.outputs.base_image }}
+        run: |
+          if [[ -z "$BASE_IMAGE" ]]; then
+            echo "::warning::Could not determine base image, skipping age check"
+            echo "age_days=0" >> "$GITHUB_OUTPUT"
+            echo "status=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Pull the image to inspect it
+          if ! podman pull "$BASE_IMAGE" 2>/dev/null; then
+            echo "::warning::Could not pull base image, skipping age check"
+            echo "age_days=0" >> "$GITHUB_OUTPUT"
+            echo "status=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Get image creation date
+          CREATED=$(podman inspect "$BASE_IMAGE" --format '{{.Created}}' 2>/dev/null || echo "")
+          if [[ -z "$CREATED" ]]; then
+            echo "::warning::Could not determine image creation date"
+            echo "age_days=0" >> "$GITHUB_OUTPUT"
+            echo "status=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Calculate age in days
+          CREATED_EPOCH=$(date -d "$CREATED" +%s 2>/dev/null || \
+            date -j -f "%Y-%m-%dT%H:%M:%S" "${CREATED%%.*}" +%s 2>/dev/null || echo "0")
+          CURRENT_EPOCH=$(date +%s)
+          AGE_DAYS=$(( (CURRENT_EPOCH - CREATED_EPOCH) / 86400 ))
+
+          echo "age_days=$AGE_DAYS" >> "$GITHUB_OUTPUT"
+          echo "::notice::Base image is $AGE_DAYS days old"
+
+          if [[ $AGE_DAYS -gt ${{ env.IMAGE_FAIL_AGE }} ]]; then
+            echo "::warning::Base image is more than ${{ env.IMAGE_FAIL_AGE }} days old. Consider updating."
+            echo "status=stale" >> "$GITHUB_OUTPUT"
+          elif [[ $AGE_DAYS -gt ${{ env.IMAGE_WARN_AGE }} ]]; then
+            echo "::warning::Base image is more than ${{ env.IMAGE_WARN_AGE }} days old. Consider updating soon."
+            echo "status=warning" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ============================================================================
+  # Build Stage
+  # ============================================================================
+  build:
+    name: Build Execution Environment
+    runs-on: ubuntu-latest
+    needs: [validate-tokens, check-base-image]
+    # Runs even if check-base-image was skipped (workflow_dispatch) so builds are not blocked
+    if: |
+      always() &&
+      needs.validate-tokens.result == 'success' &&
+      (needs.check-base-image.result == 'success' || needs.check-base-image.result == 'skipped')
+    outputs:
+      image_digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ansible-builder
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible-builder ansible-core
+
+      - name: Login to container registry
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}" | \
+            buildah login -u "${{ secrets.REGISTRY_USERNAME || github.actor }}" \
+            --password-stdin "${{ env.REGISTRY }}"
+
+      - name: Login to Red Hat registry (for base images)
+        if: vars.REDHAT_REGISTRY_USERNAME != ''
+        run: |
+          echo "${{ secrets.REDHAT_REGISTRY_PASSWORD }}" | \
+            buildah login -u "${{ vars.REDHAT_REGISTRY_USERNAME }}" \
+            --password-stdin registry.redhat.io
+
+      - name: Verify buildah version
+        run: |
+          BUILDAH_VERSION=$(buildah --version | grep -oP '\d+\.\d+\.\d+' | head -1)
+          MAJOR=$(echo "$BUILDAH_VERSION" | cut -d. -f1)
+          MINOR=$(echo "$BUILDAH_VERSION" | cut -d. -f2)
+          if [[ "$MAJOR" -lt 1 ]] || { [[ "$MAJOR" -eq 1 ]] && [[ "$MINOR" -lt 24 ]]; }; then
+            echo "::error::buildah $BUILDAH_VERSION is too old — 1.24+ required so ARG values are not leaked to image history (containers/buildah#3609)"
+            exit 1
+          fi
+          echo "::notice::buildah $BUILDAH_VERSION — ARG values will not appear in image history"
+
+      - name: Build execution environment
+        id: build
+        env:
+
+          ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN }}
+          ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN }}
+          ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN }}
+          # Use the repo's ansible.cfg for host-side dependency resolution
+          ANSIBLE_CONFIG: ./ansible.cfg
+        run: |
+          echo "::group::Creating build context"
+          echo "::notice::EE directory: ${{ env.EE_DIR }}"
+          ansible-builder create --file "${{ env.EE_DIR }}/${{ env.EE_FILE_NAME }}" --output-filename Containerfile
+
+
+          echo "::endgroup::"
+
+          echo "::group::Building image"
+
+          # Volume-mount ansible.cfg into the build (never enters any OCI layer).
+          # Ansible reads /etc/ansible/ansible.cfg as a fallback config path.
+          EXTRA_ARGS=()
+          if [[ -f "${{ env.EE_DIR }}/ansible.cfg" ]]; then
+            EXTRA_ARGS+=(--volume "$(pwd)/${{ env.EE_DIR }}/ansible.cfg:/etc/ansible/ansible.cfg:ro")
+          fi
+
+
+          # Pass non-empty tokens as build args. ARG values are available during
+          # RUN instructions but do not persist in the final image.
+          if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN" ]]; then
+            EXTRA_ARGS+=(--build-arg ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN)
+          fi
+          if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN" ]]; then
+            EXTRA_ARGS+=(--build-arg ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN)
+          fi
+          if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN" ]]; then
+            EXTRA_ARGS+=(--build-arg ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN)
+          fi
+
+          buildah bud "${EXTRA_ARGS[@]}" \
+            --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
+            --file context/Containerfile \
+            context/
+          echo "::endgroup::"
+
+      - name: Test execution environment
+        run: |
+          echo "::group::Testing EE"
+          podman run --rm "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
+            ansible --version
+          podman run --rm "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
+            ansible-galaxy collection list
+          echo "::endgroup::"
+
+      - name: Push image
+        id: push
+        run: |
+          buildah push --digestfile /tmp/digest \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
+            "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
+          echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
+
+  # ============================================================================
+  # Release Stage
+  # ============================================================================
+  release:
+    name: Release Execution Environment
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'release'
+    steps:
+      - name: Login to container registry
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}" | \
+            buildah login -u "${{ secrets.REGISTRY_USERNAME || github.actor }}" \
+            --password-stdin "${{ env.REGISTRY }}"
+
+      - name: Tag and push release
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          # Pull the image built from this commit (pushed in build job)
+          buildah pull "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
+
+          # Backup previous production tag if it exists
+          if buildah pull "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:prd" 2>/dev/null; then
+            echo "::notice::Backing up previous production image to 'previous' tag"
+            buildah tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:prd" \
+              "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:previous"
+            buildah push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:previous"
+          fi
+
+          # Tag and push version, latest, and production
+          for TAG in "${VERSION}" "latest" "prd"; do
+            buildah tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
+              "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}"
+            buildah push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}"
+          done
+
+          echo "::notice::Released version ${VERSION}"
+
+  # ============================================================================
+  # Summary
+  # ============================================================================
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [validate-tokens, check-base-image, build]
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## Execution Environment Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Validation Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Check | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Token Validation | ${{ needs.validate-tokens.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Base Image Check | ${{ needs.check-base-image.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Authentication Status" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Provider | Configured |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|------------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Galaxy Server Tokens | ${{ needs.validate-tokens.outputs.galaxy_tokens_configured }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SCM Tokens | ${{ needs.validate-tokens.outputs.git_token_configured }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "${{ needs.check-base-image.outputs.image_age_days }}" != "" ]]; then
+            echo "### Base Image Status" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Age: ${{ needs.check-base-image.outputs.image_age_days }} days" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Status: ${{ needs.check-base-image.outputs.image_status }}" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "### Build Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Step | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build | ${{ needs.build.result }} |" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "${{ needs.build.result }}" == "success" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Image Details" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Registry: \`${{ env.REGISTRY }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Image: \`${{ env.IMAGE_NAME }}\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- EE Directory: \`${{ env.EE_DIR }}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi

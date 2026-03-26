@@ -1,0 +1,28 @@
+---
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform/ee-minimal-rhel8:2.18
+
+dependencies:
+  python_interpreter:
+    python_path: /usr/bin/python3.12
+
+  galaxy:
+    collections:
+      - name: ansible.mcp_builder
+        version: "1.0.3"
+        source: private_hub_validated
+      - name: my_ns.my_col
+        version: "1.0.2"
+        source: private_hub_published
+
+additional_build_steps:
+  prepend_galaxy:
+    - ARG ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN
+    - ARG ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN
+    - ARG ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN
+
+options:
+  package_manager_path: /usr/bin/microdnf
