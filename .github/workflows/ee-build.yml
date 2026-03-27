@@ -338,11 +338,13 @@ jobs:
 
       - name: Push image
         id: push
+        env:
+          REG_USER: ${{ secrets.REGISTRY_USERNAME }}
+          REG_PASS: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
-          buildah push --digestfile /tmp/digest \
+          buildah push --tls-verify=false --creds "${REG_USER}:${REG_PASS}" --digestfile /tmp/digest \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
-          echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
   # ============================================================================
   # Release Stage
   # ============================================================================
