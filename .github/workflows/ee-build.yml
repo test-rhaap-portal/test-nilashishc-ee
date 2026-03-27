@@ -11,9 +11,8 @@
 #   Galaxy server tokens follow the Ansible naming convention:
 #     ANSIBLE_GALAXY_SERVER_<ID>_TOKEN
 #   where <ID> matches the [galaxy_server.<id>] section in ansible.cfg.
-#   ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN
-#   ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN
 #   ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN
+#   ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_VALIDATED_TOKEN
 #   REGISTRY_USERNAME/PASSWORD   - Container registry credentials
 #   REDHAT_REGISTRY_PASSWORD     - Red Hat registry for base images
 #
@@ -37,12 +36,12 @@ on:
       ee_dir:
         description: "Directory containing the EE files (relative to repo root)"
         required: false
-        default: "network-ee"
+        default: "."
         type: string
       ee_file_name:
         description: "EE definition file name"
         required: false
-        default: "network-ee.yml"
+        default: "infra-ee.yml"
         type: string
       ee_registry:
         description: "Container registry"
@@ -52,7 +51,12 @@ on:
       ee_image_name:
         description: "Container image name (defaults to repository name)"
         required: false
-        default: "test-rhaap-portal/network-ee"
+        default: ""
+        type: string
+      registry_tls_verify:
+        description: "Verify TLS certificates for container registries (true/false)"
+        required: false
+        default: "false"
         type: string
       skip_base_image_validation:
         description: "Skip base image validation"
@@ -74,9 +78,10 @@ env:
   # Container registry configuration (override via repository Variables)
   REGISTRY: ${{ inputs.ee_registry || vars.EE_REGISTRY || 'ghcr.io' }}
   IMAGE_NAME: ${{ inputs.ee_image_name || vars.EE_IMAGE_NAME || github.repository }}
+  REGISTRY_TLS_VERIFY: ${{ inputs.registry_tls_verify || vars.REGISTRY_TLS_VERIFY || 'false' }}
   # EE directory and file name (override via workflow_dispatch inputs or repository Variables)
   EE_DIR: ${{ inputs.ee_dir || vars.EE_DIR || '.' }}
-  EE_FILE_NAME: ${{ inputs.ee_file_name || vars.EE_FILE_NAME || 'network-ee.yml' }}
+  EE_FILE_NAME: ${{ inputs.ee_file_name || vars.EE_FILE_NAME || 'infra-ee.yml' }}
   # Base image age thresholds (in days) - annotations only, never blocks the build
   IMAGE_WARN_AGE: 40
   IMAGE_FAIL_AGE: 80
@@ -96,29 +101,22 @@ jobs:
         id: check-galaxy
         env:
 
-          ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN }}
-          ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN }}
           ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN }}
+          ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_VALIDATED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_VALIDATED_TOKEN }}
         run: |
           CONFIGURED=false
 
-          if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN" ]]; then
-            echo "::notice::ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN is configured"
-            CONFIGURED=true
-          else
-            echo "::notice::No ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN secret configured"
-          fi
-          if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN" ]]; then
-            echo "::notice::ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN is configured"
-            CONFIGURED=true
-          else
-            echo "::notice::No ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN secret configured"
-          fi
           if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN" ]]; then
             echo "::notice::ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN is configured"
             CONFIGURED=true
           else
             echo "::notice::No ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN secret configured"
+          fi
+          if [[ -n "$ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_VALIDATED_TOKEN" ]]; then
+            echo "::notice::ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_VALIDATED_TOKEN is configured"
+            CONFIGURED=true
+          else
+            echo "::notice::No ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_VALIDATED_TOKEN secret configured"
           fi
           echo "configured=$CONFIGURED" >> "$GITHUB_OUTPUT"
 
@@ -146,7 +144,8 @@ jobs:
         if: vars.REDHAT_REGISTRY_USERNAME != ''
         run: |
           echo "${{ secrets.REDHAT_REGISTRY_PASSWORD }}" | \
-            podman login -u "${{ vars.REDHAT_REGISTRY_USERNAME }}" \
+            podman login --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} \
+            -u "${{ vars.REDHAT_REGISTRY_USERNAME }}" \
             --password-stdin registry.redhat.io
 
       - name: Extract base image from ${{ env.EE_DIR }}/${{ env.EE_FILE_NAME }}
@@ -180,7 +179,7 @@ jobs:
           fi
 
           # Pull the image to inspect it
-          if ! podman pull "$BASE_IMAGE" 2>/dev/null; then
+          if ! podman pull --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} "$BASE_IMAGE" 2>/dev/null; then
             echo "::warning::Could not pull base image, skipping age check"
             echo "age_days=0" >> "$GITHUB_OUTPUT"
             echo "status=unknown" >> "$GITHUB_OUTPUT"
@@ -243,11 +242,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install ansible-builder ansible-core
 
+      - name: Login to container registry
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}" | \
+            buildah login --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} \
+            -u "${{ secrets.REGISTRY_USERNAME || github.actor }}" \
+            --password-stdin "${{ env.REGISTRY }}"
+
       - name: Login to Red Hat registry (for base images)
         if: vars.REDHAT_REGISTRY_USERNAME != ''
         run: |
           echo "${{ secrets.REDHAT_REGISTRY_PASSWORD }}" | \
-            buildah login -u "${{ vars.REDHAT_REGISTRY_USERNAME }}" \
+            buildah login --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} \
+            -u "${{ vars.REDHAT_REGISTRY_USERNAME }}" \
             --password-stdin registry.redhat.io
 
       - name: Verify buildah version
@@ -265,9 +272,8 @@ jobs:
         id: build
         env:
 
-          ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN }}
-          ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN }}
           ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN }}
+          ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_VALIDATED_TOKEN: ${{ secrets.ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_VALIDATED_TOKEN }}
           # Use the repo's ansible.cfg for host-side dependency resolution
           ANSIBLE_CONFIG: ./ansible.cfg
         run: |
@@ -290,17 +296,15 @@ jobs:
 
           # Pass non-empty tokens as build args. ARG values are available during
           # RUN instructions but do not persist in the final image.
-          if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN" ]]; then
-            EXTRA_ARGS+=(--build-arg ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_VALIDATED_TOKEN)
-          fi
-          if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN" ]]; then
-            EXTRA_ARGS+=(--build-arg ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_PUBLISHED_TOKEN)
-          fi
           if [[ -n "$ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN" ]]; then
             EXTRA_ARGS+=(--build-arg ANSIBLE_GALAXY_SERVER_PRIVATE_HUB_RH_CERTIFIED_TOKEN)
           fi
+          if [[ -n "$ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_VALIDATED_TOKEN" ]]; then
+            EXTRA_ARGS+=(--build-arg ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_VALIDATED_TOKEN)
+          fi
 
-          buildah bud "${EXTRA_ARGS[@]}" \
+          buildah bud --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} \
+            "${EXTRA_ARGS[@]}" \
             --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             --file context/Containerfile \
             context/
@@ -315,36 +319,15 @@ jobs:
             ansible-galaxy collection list
           echo "::endgroup::"
 
-      - name: Logout of Red Hat registry (for base images)
-        if: vars.REDHAT_REGISTRY_USERNAME != ''
-        run: |
-          buildah logout registry.redhat.io
-
-      - name: Debug credential lengths
-        env:
-          REG_USER: ${{ secrets.REGISTRY_USERNAME }}
-          REG_PASS: ${{ secrets.REGISTRY_PASSWORD }}
-        run: |
-          echo "user length: ${#REG_USER}"
-          echo "pass length: ${#REG_PASS}"
-          echo "user hex tail: $(echo -n "$REG_USER" | tail -c 4 | xxd -p)"
-          echo "pass hex tail: $(echo -n "$REG_PASS" | tail -c 4 | xxd -p)"
-      
-      - name: Login to container registry
-        run: |
-          echo '${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}' | \
-            podman login --tls-verify=false -u "${{ vars.REGISTRY_USERNAME || github.actor }}" \
-            --password-stdin "${{ env.REGISTRY }}"
-
       - name: Push image
         id: push
-        env:
-          REG_USER: ${{ secrets.REGISTRY_USERNAME }}
-          REG_PASS: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
-          buildah push --tls-verify=false --creds "${REG_USER}:${REG_PASS}" --digestfile /tmp/digest \
+          buildah push --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} \
+            --digestfile /tmp/digest \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
+          echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
+
   # ============================================================================
   # Release Stage
   # ============================================================================
@@ -357,7 +340,8 @@ jobs:
       - name: Login to container registry
         run: |
           echo "${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}" | \
-            buildah login -u "${{ secrets.REGISTRY_USERNAME || github.actor }}" \
+            buildah login --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} \
+            -u "${{ secrets.REGISTRY_USERNAME || github.actor }}" \
             --password-stdin "${{ env.REGISTRY }}"
 
       - name: Tag and push release
@@ -365,21 +349,25 @@ jobs:
           VERSION: ${{ github.event.release.tag_name }}
         run: |
           # Pull the image built from this commit (pushed in build job)
-          buildah pull "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
+          buildah pull --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
 
           # Backup previous production tag if it exists
-          if buildah pull "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:prd" 2>/dev/null; then
+          if buildah pull --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:prd" 2>/dev/null; then
             echo "::notice::Backing up previous production image to 'previous' tag"
             buildah tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:prd" \
               "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:previous"
-            buildah push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:previous"
+            buildah push --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} \
+              "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:previous"
           fi
 
           # Tag and push version, latest, and production
           for TAG in "${VERSION}" "latest" "prd"; do
             buildah tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
               "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}"
-            buildah push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}"
+            buildah push --tls-verify=${{ env.REGISTRY_TLS_VERIFY }} \
+              "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}"
           done
 
           echo "::notice::Released version ${VERSION}"
