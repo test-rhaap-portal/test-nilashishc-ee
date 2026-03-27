@@ -314,6 +314,11 @@ jobs:
           podman run --rm "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             ansible-galaxy collection list
           echo "::endgroup::"
+
+      - name: Logout of Red Hat registry (for base images)
+        if: vars.REDHAT_REGISTRY_USERNAME != ''
+        run: |
+          buildah logout registry.redhat.io
       
       - name: Login to container registry
         run: |
@@ -323,8 +328,11 @@ jobs:
 
       - name: Push image
         id: push
+        env:
+          PUSH_REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          PUSH_REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
         run: |
-          buildah push --tls-verify=false --digestfile /tmp/digest \
+          buildah push --tls-verify=false --creds ${PUSH_REGISTRY_USERNAME}:${PUSH_REGISTRY_PASSWORD} --digestfile /tmp/digest \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
           echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
