@@ -328,14 +328,11 @@ jobs:
 
       - name: Push image
         id: push
-        env:
-          REG_USER: ${{ secrets.REGISTRY_USERNAME || github.actor }}
-          REG_PASS: ${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}
         run: |
-          podman push --tls-verify=false --creds "${REG_USER}:${REG_PASS}" \
-          "13.222.213.23/test-rhaap-portal/network-ee:build-${{ github.sha }}" \
-          "docker://13.222.213.23/test-rhaap-portal/network-ee:build-${{ github.sha }}"
-
+          buildah push --digestfile /tmp/digest \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
+            "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
+          echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
   # ============================================================================
   # Release Stage
   # ============================================================================
