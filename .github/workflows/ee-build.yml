@@ -245,8 +245,8 @@ jobs:
 
       - name: Login to container registry
         run: |
-          echo "${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}" | \
-            buildah login --tls-verify=false -u "${{ secrets.REGISTRY_USERNAME || github.actor }}" \
+          echo '${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}' | \
+            buildah login --tls-verify=false -u "${{ vars.REGISTRY_USERNAME || github.actor }}" \
             --password-stdin "${{ env.REGISTRY }}"
 
       - name: Login to Red Hat registry (for base images)
