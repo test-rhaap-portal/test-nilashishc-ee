@@ -238,6 +238,17 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Upgrade buildah
+        run: |
+          . /etc/os-release
+          echo "deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_${VERSION_ID}/ /" | \
+            sudo tee /etc/apt/sources.list.d/devel:kubic:libcontainers:unstable.list
+          curl -fsSL "https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/unstable/xUbuntu_${VERSION_ID}/Release.key" | \
+            gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/devel_kubic_libcontainers_unstable.gpg > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq buildah
+          echo "::notice::Upgraded to buildah $(buildah --version | grep -oP '\d+\.\d+\.\d+')"
+
       - name: Install ansible-builder
         run: |
           python -m pip install --upgrade pip
