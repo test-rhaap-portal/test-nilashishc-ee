@@ -328,11 +328,8 @@ jobs:
 
       - name: Push image
         id: push
-        env:
-          PUSH_REGISTRY_USERNAME: ${{ vars.REGISTRY_USERNAME }}
-          PUSH_REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
-          buildah push --creds "${PUSH_REGISTRY_USERNAME}:${PUSH_REGISTRY_PASSWORD}" --tls-verify=false --digestfile /tmp/digest \
+          buildah push --tls-verify=false --digestfile /tmp/digest \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
           echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
