@@ -331,7 +331,7 @@ jobs:
         env:
           REGISTRY_CREDS: "${{ vars.REGISTRY_USERNAME || github.actor }}:${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}"
         run: |
-          buildah push --tls-verify=false --creds "$REGISTRY_CREDS" --digestfile /tmp/digest \
+          buildah push --tls-verify=false --creds $REGISTRY_CREDS --digestfile /tmp/digest \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
           echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
