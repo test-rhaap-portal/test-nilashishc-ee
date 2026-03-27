@@ -326,6 +326,12 @@ jobs:
             buildah login --tls-verify=false -u "${{ vars.REGISTRY_USERNAME || github.actor }}" \
             --password-stdin "${{ env.REGISTRY }}"
 
+      - name: Verify creds
+        run: |
+          cat ${XDG_RUNTIME_DIR}/containers/auth.json 2>/dev/null || \
+          cat ~/.config/containers/auth.json 2>/dev/null || \
+          echo "No auth.json found"
+
       - name: Push image
         id: push
         run: |
