@@ -243,12 +243,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install ansible-builder ansible-core
 
-      - name: Login to container registry
-        run: |
-          echo '${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}' | \
-            buildah login --tls-verify=false -u "${{ vars.REGISTRY_USERNAME || github.actor }}" \
-            --password-stdin "${{ env.REGISTRY }}"
-
       - name: Login to Red Hat registry (for base images)
         if: vars.REDHAT_REGISTRY_USERNAME != ''
         run: |
@@ -321,15 +315,16 @@ jobs:
             ansible-galaxy collection list
           echo "::endgroup::"
       
-      - name: Verify logged in or not
-        id: verify-logged-in
+      - name: Login to container registry
         run: |
-          buildah login "${{ env.REGISTRY }}" --tls-verify=false
+          echo '${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}' | \
+            buildah login --tls-verify=false -u "${{ vars.REGISTRY_USERNAME || github.actor }}" \
+            --password-stdin "${{ env.REGISTRY }}"
 
       - name: Push image
         id: push
         run: |
-          buildah push --creds admin:'Admin!Password!Gw' --tls-verify=false --digestfile /tmp/digest \
+          buildah push --tls-verify=false --digestfile /tmp/digest \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
           echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
