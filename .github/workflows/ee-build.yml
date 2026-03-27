@@ -323,17 +323,13 @@ jobs:
       - name: Login to container registry
         run: |
           echo '${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}' | \
-            buildah login --tls-verify=false -u "${{ vars.REGISTRY_USERNAME || github.actor }}" \
+            podman login --tls-verify=false -u "${{ vars.REGISTRY_USERNAME || github.actor }}" \
             --password-stdin "${{ env.REGISTRY }}"
 
       - name: Push image
         id: push
-        if: github.event_name != 'pull_request'
-        env:
-          REG_USER: ${{ secrets.REGISTRY_USERNAME || github.actor }}
-          REG_PASS: ${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}
         run: |
-          buildah push --tls-verify=false --creds ${REG_USER}:${REG_PASS} --digestfile /tmp/digest \
+          podman push --tls-verify=false --digestfile /tmp/digest \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
           echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
