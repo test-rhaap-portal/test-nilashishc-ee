@@ -329,7 +329,7 @@ jobs:
       - name: Push image
         id: push
         run: |
-          buildah push --tls-verify=false --digestfile /tmp/digest \
+          buildah push --tls-verify=false --format v2s2 --compression-format gzip --remove-signatures --digestfile /tmp/digest \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
           echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
