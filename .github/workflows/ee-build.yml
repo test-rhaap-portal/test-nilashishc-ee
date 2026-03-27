@@ -329,7 +329,7 @@ jobs:
       - name: Push image
         id: push
         run: |
-          PUSH_CREDS="${{ secrets.REGISTRY_USERNAME || github.actor }}:${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}"
+          PUSH_CREDS="${{ vars.REGISTRY_USERNAME || github.actor }}:${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}"
           buildah push --tls-verify=false --creds "$PUSH_CREDS" --digestfile /tmp/digest \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
