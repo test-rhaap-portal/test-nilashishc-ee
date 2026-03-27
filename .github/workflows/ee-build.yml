@@ -328,7 +328,6 @@ jobs:
 
       - name: Push image
         id: push
-        if: github.event_name != 'pull_request'
         env:
           REGISTRY_CREDS: "${{ vars.REGISTRY_USERNAME || github.actor }}:${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}"
         run: |
