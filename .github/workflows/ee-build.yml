@@ -319,6 +319,16 @@ jobs:
         if: vars.REDHAT_REGISTRY_USERNAME != ''
         run: |
           buildah logout registry.redhat.io
+
+      - name: Debug credential lengths
+        env:
+          REG_USER: ${{ secrets.REGISTRY_USERNAME }}
+          REG_PASS: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          echo "user length: ${#REG_USER}"
+          echo "pass length: ${#REG_PASS}"
+          echo "user hex tail: $(echo -n "$REG_USER" | tail -c 4 | xxd -p)"
+          echo "pass hex tail: $(echo -n "$REG_PASS" | tail -c 4 | xxd -p)"
       
       - name: Login to container registry
         run: |
