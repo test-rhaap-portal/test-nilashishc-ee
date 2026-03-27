@@ -238,13 +238,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Upgrade buildah
-        run: |
-          BUILDAH_VERSION=1.43.0
-          curl -fsSL "https://github.com/containers/buildah/releases/download/v${BUILDAH_VERSION}/buildah-v${BUILDAH_VERSION}.linux-amd64.tar.gz" | \
-            sudo tar -xzf - -C /usr/local/bin/ --strip-components=1
-          echo "::notice::buildah $(buildah --version | grep -oP '\d+\.\d+\.\d+')"
-
       - name: Install ansible-builder
         run: |
           python -m pip install --upgrade pip
@@ -333,16 +326,10 @@ jobs:
             buildah login --tls-verify=false -u "${{ vars.REGISTRY_USERNAME || github.actor }}" \
             --password-stdin "${{ env.REGISTRY }}"
 
-      - name: Verify creds
-        run: |
-          cat ${XDG_RUNTIME_DIR}/containers/auth.json 2>/dev/null || \
-          cat ~/.config/containers/auth.json 2>/dev/null || \
-          echo "No auth.json found"
-
       - name: Push image
         id: push
         run: |
-          buildah push --tls-verify=false --digestfile /tmp/digest \
+          buildah push --creds '${{ vars.REGISTRY_USERNAME }}:{{ secrets.REGISTRY_PASSWORD }}' --tls-verify=false --digestfile /tmp/digest \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}" \
             "docker://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.sha }}"
           echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
